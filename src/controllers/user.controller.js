@@ -2,8 +2,29 @@ import asyncHandler from "../utils/asyncHandler.js";
 import ApiError from "../utils/ApiError.js";
 import { User } from "../models/user.models.js";
 import { uploadOnCloudinary } from "../utils/cloudinary.js";
-import upload from "../middlewares/multer.middleware.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
+import jwt from "jsonwebtoken"
+
+const generateAccessandRefreshToken = async (user_id) => {
+    try {
+        const user = await User.findById(user_id);
+        // console.log(user);
+
+        const accessToken = user.generateAccessToken();
+        const refreshToken = user.generateRefreshToken();
+        // console.log(accessToken, refreshToken);
+
+        user.refreshToken = refreshToken;
+        await user.save({ validateBeforeSave: false });
+
+        return { accessToken, refreshToken };
+    } catch (error) {
+        throw new ApiError(
+            501,
+            error?.message || "Something went wrong while generating tokens"
+        );
+    }
+};
 
 const registerUser = asyncHandler(async (req, res) => {
     // register a user means save the users data in the users database
@@ -62,10 +83,97 @@ const registerUser = asyncHandler(async (req, res) => {
         throw new ApiError(500, "Something went wrong while registering");
     }
 
-    return res.status(201).json(
-        new ApiResponse(200, createdUser)
-    )
+    return res.status(201).json(new ApiResponse(200, createdUser));
 });
 
+const loginUser = asyncHandler(async (req, res) => {
+    // take details provided by the user from the frontend part
+    // find the particular dataset in the database
+    // if found decrypt the password given by the user
+    // if not found return no registered user of the given username
 
-export default registerUser;
+    const { username, email, password } = req.body;
+
+    if (!(username || email)) {
+        throw new ApiError(400, "Username or email is required");
+    }
+
+    const user = await User.findOne({
+        $or: [{ username }, { email }],
+    });
+
+    if (!user) {
+        throw new ApiError(404, "User not Found!!");
+    }
+
+    const isPasswordValid = await user.isPasswordCorrect(password);
+
+    if (!isPasswordValid) {
+        throw new ApiError(401, "Invalid User Credentials");
+    }
+
+    const { accessToken, refreshToken } = await generateAccessandRefreshToken(
+        user._id
+    );
+    const loggedInUser = await User.findById(user._id).select(
+        "-password -refreshToken"
+    );
+    // console.log(accessToken, refreshToken);
+
+
+
+    //testing codee
+    
+    // const sample = jwt.verify(accessToken, process.env.ACCESS_TOKEN_SECRET)
+    // console.log(sample);
+    
+
+
+    const options = {
+        httpOnly: true,
+        secure: true,
+    };
+
+    return res
+        .status(200)
+        .cookie("accessToken", accessToken, options)
+        .cookie("refreshToken", refreshToken, options)
+        .json(
+            new ApiResponse(
+                200,
+                {
+                    user: loggedInUser,
+                    accessToken: accessToken,
+                    refreshToken: refreshToken,
+                },
+                "User logged In Successfully"
+            )
+        );
+});
+
+const logoutUser = asyncHandler(async (req, res) => {
+    User.findByIdAndUpdate(
+        req.user._id,
+        {
+            $set: {
+                refreshToken: undefined,
+            },
+        },
+        {
+            new: true,
+        }
+    );
+
+    const options = {
+        httpOnly: true,
+        secure: true,
+    };
+
+    return res
+        .status(200)
+        .clearCookie("accessToken", options)
+        .clearCookie("refreshToken", options)
+        .json(new ApiResponse(201, "User LoggedOut Successfully"));
+});
+
+export { registerUser, loginUser, logoutUser };
